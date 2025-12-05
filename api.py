@@ -3,6 +3,9 @@ from flask_cors import CORS
 import requests
 import re
 import os
+from datetime import datetime, timedelta
+from collections import defaultdict
+import secrets
 
 app = Flask(__name__)
 
@@ -11,7 +14,7 @@ CORS(app, resources={
     r"/*": {
         "origins": "*",
         "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "X-Access-Token"]
+        "allow_headers": ["Content-Type", "X-Access-Token", "X-Admin-Token"]
     }
 })
 
@@ -23,8 +26,21 @@ ROBLOX_COOKIE = os.getenv('ROBLOX_COOKIE', '')
 VALID_KEYS = os.getenv('VALID_KEY', '').split(',')
 VALID_KEYS = [key.strip() for key in VALID_KEYS if key.strip()]
 
+# Credentials Admin depuis l'environnement
+ADMIN_LOGIN = os.getenv('ADMIN_LOGIN', 'admin')
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'KryosAdmin2025!')
+
 # Tokens actifs (en mémoire, pour une vraie prod utilise Redis ou une DB)
 active_tokens = {}
+admin_tokens = {}
+
+# Rate limiting pour admin login
+admin_login_attempts = defaultdict(list)
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_TIMEOUT_MINUTES = 15
+
+# Stockage des connexions (en mémoire, utilise une DB en prod)
+connections_log = []
 
 def get_headers():
     return {
@@ -39,6 +55,30 @@ def get_headers():
         "sec-fetch-site": "same-site",
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0"
     }
+
+def get_client_ip():
+    """Récupère l'IP du client en tenant compte des proxies"""
+    if request.headers.get('X-Forwarded-For'):
+        return request.headers.get('X-Forwarded-For').split(',')[0].strip()
+    return request.remote_addr
+
+def check_rate_limit(ip):
+    """Vérifie le rate limit pour les tentatives de connexion admin"""
+    now = datetime.now()
+    # Nettoyer les anciennes tentatives
+    admin_login_attempts[ip] = [
+        attempt for attempt in admin_login_attempts[ip]
+        if now - attempt < timedelta(minutes=LOGIN_TIMEOUT_MINUTES)
+    ]
+    
+    if len(admin_login_attempts[ip]) >= MAX_LOGIN_ATTEMPTS:
+        return False
+    
+    return True
+
+def add_login_attempt(ip):
+    """Ajoute une tentative de connexion"""
+    admin_login_attempts[ip].append(datetime.now())
 
 def fetch_group_wall_posts(cursor=""):
     url = f"{API_URL}{cursor}" if cursor else API_URL
@@ -90,14 +130,17 @@ def fetch_all_pages(max_pages=5):
 def check_page_title():
     """Vérifie si le referer contient le bon titre de page"""
     referer = request.headers.get('Referer', '')
-    # On vérifie juste que la requête vient d'un site web légitime
-    # Le titre de page ne peut pas être vérifié côté serveur de manière fiable
-    return True  # Pour l'instant on autorise, mais on vérifie le token
+    return True
 
 def verify_access_token():
     """Vérifie le token d'accès dans les headers"""
     token = request.headers.get('X-Access-Token', '')
     return token in active_tokens
+
+def verify_admin_token():
+    """Vérifie le token admin dans les headers"""
+    token = request.headers.get('X-Admin-Token', '')
+    return token in admin_tokens
 
 @app.route('/verify-key', methods=['POST'])
 def verify_key():
@@ -111,7 +154,6 @@ def verify_key():
         
         if key in VALID_KEYS:
             # Génération d'un token unique
-            import secrets
             token = secrets.token_urlsafe(32)
             active_tokens[token] = key
             
@@ -125,6 +167,139 @@ def verify_key():
     
     except Exception as e:
         return jsonify({"valid": False, "error": str(e)}), 500
+
+@app.route('/admin/login', methods=['POST'])
+def admin_login():
+    """Vérifie les credentials admin et génère un token"""
+    try:
+        client_ip = get_client_ip()
+        
+        # Vérifier le rate limit
+        if not check_rate_limit(client_ip):
+            return jsonify({
+                "valid": False,
+                "error": f"Too many attempts. Try again in {LOGIN_TIMEOUT_MINUTES} minutes"
+            }), 429
+        
+        data = request.get_json()
+        login = data.get('login', '').strip()
+        password = data.get('password', '').strip()
+        
+        if not login or not password:
+            add_login_attempt(client_ip)
+            return jsonify({"valid": False, "error": "Login and password required"}), 400
+        
+        # Vérifier les credentials
+        if login == ADMIN_LOGIN and password == ADMIN_PASSWORD:
+            # Génération d'un token admin unique
+            token = secrets.token_urlsafe(32)
+            admin_tokens[token] = {
+                "login": login,
+                "ip": client_ip,
+                "created_at": datetime.now().isoformat()
+            }
+            
+            # Réinitialiser les tentatives
+            admin_login_attempts[client_ip] = []
+            
+            return jsonify({
+                "valid": True,
+                "token": token,
+                "message": "Admin access granted"
+            })
+        
+        # Mauvais credentials
+        add_login_attempt(client_ip)
+        remaining_attempts = MAX_LOGIN_ATTEMPTS - len(admin_login_attempts[client_ip])
+        
+        return jsonify({
+            "valid": False,
+            "error": f"Invalid credentials. {remaining_attempts} attempts remaining"
+        }), 401
+    
+    except Exception as e:
+        return jsonify({"valid": False, "error": str(e)}), 500
+
+@app.route('/admin/connections', methods=['GET'])
+def get_connections():
+    """Récupère les logs de connexions - nécessite un token admin"""
+    try:
+        if not verify_admin_token():
+            return jsonify({"error": "Unauthorized - Invalid admin token"}), 401
+        
+        # Trier par date décroissante
+        sorted_connections = sorted(
+            connections_log,
+            key=lambda x: x.get('timestamp', ''),
+            reverse=True
+        )
+        
+        return jsonify({
+            "connections": sorted_connections,
+            "total": len(connections_log)
+        })
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/admin/log-connection', methods=['POST'])
+def log_connection():
+    """Enregistre une connexion"""
+    try:
+        data = request.get_json()
+        
+        connection_entry = {
+            "ip": data.get('ip', get_client_ip()),
+            "country": data.get('country', 'Unknown'),
+            "countryName": data.get('countryName', 'Unknown'),
+            "key": data.get('key', 'N/A'),
+            "userAgent": data.get('userAgent', request.headers.get('User-Agent', 'Unknown')),
+            "timestamp": datetime.now().isoformat(),
+            "type": data.get('type', 'USER_ACCESS')
+        }
+        
+        connections_log.append(connection_entry)
+        
+        # Limiter la taille du log en mémoire (garder les 1000 dernières connexions)
+        if len(connections_log) > 1000:
+            connections_log.pop(0)
+        
+        return jsonify({"success": True, "message": "Connection logged"})
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/admin/stats', methods=['GET'])
+def get_stats():
+    """Récupère les statistiques - nécessite un token admin"""
+    try:
+        if not verify_admin_token():
+            return jsonify({"error": "Unauthorized - Invalid admin token"}), 401
+        
+        # Calculer les stats
+        unique_ips = len(set(conn.get('ip') for conn in connections_log))
+        
+        today = datetime.now().date()
+        today_connections = sum(
+            1 for conn in connections_log
+            if datetime.fromisoformat(conn.get('timestamp', '')).date() == today
+        )
+        
+        # Top pays
+        country_count = {}
+        for conn in connections_log:
+            country = conn.get('country', 'Unknown')
+            country_count[country] = country_count.get(country, 0) + 1
+        
+        return jsonify({
+            "totalConnections": len(connections_log),
+            "uniqueIPs": unique_ips,
+            "todayConnections": today_connections,
+            "topCountries": country_count
+        })
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/links', methods=['GET'])
 def get_links():
@@ -159,7 +334,12 @@ def get_links():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "ok", "valid_keys_count": len(VALID_KEYS)})
+    return jsonify({
+        "status": "ok",
+        "valid_keys_count": len(VALID_KEYS),
+        "admin_configured": bool(ADMIN_LOGIN and ADMIN_PASSWORD),
+        "total_connections": len(connections_log)
+    })
 
 if __name__ == '__main__':
     if not ROBLOX_COOKIE:
@@ -170,5 +350,8 @@ if __name__ == '__main__':
         print("Example: VALID_KEY='key1,key2,key3'")
     else:
         print(f"Loaded {len(VALID_KEYS)} valid keys")
+    
+    print(f"Admin login configured: {ADMIN_LOGIN}")
+    print(f"Admin password configured: {'***' if ADMIN_PASSWORD else 'NOT SET'}")
     
     app.run(host='0.0.0.0', port=5000, debug=False)
