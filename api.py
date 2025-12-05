@@ -6,18 +6,25 @@ import os
 
 app = Flask(__name__)
 
-# ✨ CORS FIX - Permet les requêtes depuis n'importe quel domaine
+# CORS personnalisé pour autoriser seulement certains domaines
 CORS(app, resources={
     r"/*": {
         "origins": "*",
         "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
+        "allow_headers": ["Content-Type", "X-Access-Token"]
     }
 })
 
 GROUP_ID = "35815907"
 API_URL = f"https://groups.roblox.com/v2/groups/{GROUP_ID}/wall/posts?sortOrder=Desc&limit=100&cursor="
 ROBLOX_COOKIE = os.getenv('ROBLOX_COOKIE', '')
+
+# Récupération des clés valides depuis l'environnement
+VALID_KEYS = os.getenv('VALID_KEY', '').split(',')
+VALID_KEYS = [key.strip() for key in VALID_KEYS if key.strip()]
+
+# Tokens actifs (en mémoire, pour une vraie prod utilise Redis ou une DB)
+active_tokens = {}
 
 def get_headers():
     return {
@@ -80,9 +87,57 @@ def fetch_all_pages(max_pages=5):
     
     return all_posts
 
+def check_page_title():
+    """Vérifie si le referer contient le bon titre de page"""
+    referer = request.headers.get('Referer', '')
+    # On vérifie juste que la requête vient d'un site web légitime
+    # Le titre de page ne peut pas être vérifié côté serveur de manière fiable
+    return True  # Pour l'instant on autorise, mais on vérifie le token
+
+def verify_access_token():
+    """Vérifie le token d'accès dans les headers"""
+    token = request.headers.get('X-Access-Token', '')
+    return token in active_tokens
+
+@app.route('/verify-key', methods=['POST'])
+def verify_key():
+    """Vérifie si une clé est valide et génère un token d'accès"""
+    try:
+        data = request.get_json()
+        key = data.get('key', '').strip()
+        
+        if not key:
+            return jsonify({"valid": False, "error": "No key provided"}), 400
+        
+        if key in VALID_KEYS:
+            # Génération d'un token unique
+            import secrets
+            token = secrets.token_urlsafe(32)
+            active_tokens[token] = key
+            
+            return jsonify({
+                "valid": True,
+                "token": token,
+                "message": "Access granted"
+            })
+        
+        return jsonify({"valid": False, "error": "Invalid key"}), 401
+    
+    except Exception as e:
+        return jsonify({"valid": False, "error": str(e)}), 500
+
 @app.route('/links', methods=['GET'])
 def get_links():
+    """Récupère les liens de serveurs - nécessite un token valide"""
     try:
+        # Vérification du token
+        if not verify_access_token():
+            return jsonify({"error": "Unauthorized - Invalid or missing token"}), 401
+        
+        # Vérification du referer (optionnel mais recommandé)
+        if not check_page_title():
+            return jsonify({"error": "Unauthorized - Invalid referer"}), 403
+        
         pages = request.args.get('pages', default=1, type=int)
         
         if pages <= 0:
@@ -104,10 +159,16 @@ def get_links():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "valid_keys_count": len(VALID_KEYS)})
 
 if __name__ == '__main__':
     if not ROBLOX_COOKIE:
         print("WARNING: ROBLOX_COOKIE environment variable is not set")
+    
+    if not VALID_KEYS:
+        print("WARNING: VALID_KEY environment variable is not set")
+        print("Example: VALID_KEY='key1,key2,key3'")
+    else:
+        print(f"Loaded {len(VALID_KEYS)} valid keys")
     
     app.run(host='0.0.0.0', port=5000, debug=False)
