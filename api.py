@@ -6,6 +6,8 @@ import os
 from datetime import datetime, timedelta
 from collections import defaultdict
 import secrets
+import threading
+import time
 
 app = Flask(__name__)
 
@@ -34,13 +36,22 @@ ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'KryosAdmin2025!')
 active_tokens = {}
 admin_tokens = {}
 
-# Rate limiting pour admin login
+# Rate limiting pour admin login uniquement
 admin_login_attempts = defaultdict(list)
 MAX_LOGIN_ATTEMPTS = 5
 LOGIN_TIMEOUT_MINUTES = 15
 
 # Stockage des connexions (en mémoire, utilise une DB en prod)
 connections_log = []
+
+# ===== SYSTÈME DE CACHE =====
+cache_data = {
+    "links": [],
+    "last_update": None,
+    "is_updating": False
+}
+CACHE_DURATION_SECONDS = 60  # Refresh toutes les 60 secondes
+cache_lock = threading.Lock()
 
 def get_headers():
     return {
@@ -82,7 +93,7 @@ def add_login_attempt(ip):
 
 def fetch_group_wall_posts(cursor=""):
     url = f"{API_URL}{cursor}" if cursor else API_URL
-    response = requests.get(url, headers=get_headers())
+    response = requests.get(url, headers=get_headers(), timeout=10)
     response.raise_for_status()
     return response.json()
 
@@ -126,6 +137,58 @@ def fetch_all_pages(max_pages=5):
         page_count += 1
     
     return all_posts
+
+def update_cache():
+    """Met à jour le cache des liens de serveurs"""
+    global cache_data
+    
+    with cache_lock:
+        if cache_data["is_updating"]:
+            return  # Éviter les mises à jour simultanées
+        
+        cache_data["is_updating"] = True
+    
+    try:
+        print(f"[{datetime.now()}] Updating cache...")
+        all_posts = fetch_all_pages(max_pages=5)
+        links = extract_server_links(all_posts)
+        
+        with cache_lock:
+            cache_data["links"] = links
+            cache_data["last_update"] = datetime.now()
+            cache_data["is_updating"] = False
+        
+        print(f"[{datetime.now()}] Cache updated successfully - {len(links)} links found")
+    
+    except Exception as e:
+        print(f"[{datetime.now()}] Cache update failed: {str(e)}")
+        with cache_lock:
+            cache_data["is_updating"] = False
+
+def is_cache_valid():
+    """Vérifie si le cache est encore valide"""
+    if cache_data["last_update"] is None:
+        return False
+    
+    elapsed = (datetime.now() - cache_data["last_update"]).total_seconds()
+    return elapsed < CACHE_DURATION_SECONDS
+
+def get_cached_links():
+    """Récupère les liens depuis le cache ou déclenche une mise à jour"""
+    if not is_cache_valid() and not cache_data["is_updating"]:
+        # Lancer la mise à jour en arrière-plan
+        threading.Thread(target=update_cache, daemon=True).start()
+    
+    # Retourner le cache actuel (même s'il est en cours de mise à jour)
+    with cache_lock:
+        return cache_data["links"].copy()
+
+def auto_refresh_cache():
+    """Refresh automatique du cache toutes les 60 secondes"""
+    while True:
+        time.sleep(CACHE_DURATION_SECONDS)
+        if not cache_data["is_updating"]:
+            update_cache()
 
 def check_page_title():
     """Vérifie si le referer contient le bon titre de page"""
@@ -301,9 +364,27 @@ def get_stats():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/admin/force-refresh', methods=['POST'])
+def force_refresh():
+    """Force le refresh du cache - nécessite un token admin"""
+    try:
+        if not verify_admin_token():
+            return jsonify({"error": "Unauthorized - Invalid admin token"}), 401
+        
+        # Forcer la mise à jour
+        threading.Thread(target=update_cache, daemon=True).start()
+        
+        return jsonify({
+            "success": True,
+            "message": "Cache refresh initiated"
+        })
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/links', methods=['GET'])
 def get_links():
-    """Récupère les liens de serveurs - nécessite un token valide"""
+    """Récupère les liens de serveurs depuis le cache - nécessite un token valide"""
     try:
         # Vérification du token
         if not verify_access_token():
@@ -313,19 +394,23 @@ def get_links():
         if not check_page_title():
             return jsonify({"error": "Unauthorized - Invalid referer"}), 403
         
-        pages = request.args.get('pages', default=1, type=int)
+        # Récupérer les liens depuis le cache
+        links = get_cached_links()
         
-        if pages <= 0:
-            return jsonify({"error": "Pages must be greater than 0"}), 400
+        # Informations sur le cache
+        cache_age = None
+        if cache_data["last_update"]:
+            cache_age = int((datetime.now() - cache_data["last_update"]).total_seconds())
         
-        if pages == 1:
-            data = fetch_group_wall_posts()
-            links = extract_server_links(data)
-        else:
-            all_posts = fetch_all_pages(max_pages=pages)
-            links = extract_server_links(all_posts)
-        
-        return jsonify(links)
+        return jsonify({
+            "links": links,
+            "cache_info": {
+                "last_update": cache_data["last_update"].isoformat() if cache_data["last_update"] else None,
+                "cache_age_seconds": cache_age,
+                "is_updating": cache_data["is_updating"],
+                "next_update_in": CACHE_DURATION_SECONDS - cache_age if cache_age else CACHE_DURATION_SECONDS
+            }
+        })
     
     except requests.exceptions.RequestException as e:
         return jsonify({"error": f"Request failed: {str(e)}"}), 500
@@ -334,11 +419,21 @@ def get_links():
 
 @app.route('/health', methods=['GET'])
 def health():
+    cache_age = None
+    if cache_data["last_update"]:
+        cache_age = int((datetime.now() - cache_data["last_update"]).total_seconds())
+    
     return jsonify({
         "status": "ok",
         "valid_keys_count": len(VALID_KEYS),
         "admin_configured": bool(ADMIN_LOGIN and ADMIN_PASSWORD),
-        "total_connections": len(connections_log)
+        "total_connections": len(connections_log),
+        "cache_info": {
+            "cached_links": len(cache_data["links"]),
+            "last_update": cache_data["last_update"].isoformat() if cache_data["last_update"] else None,
+            "cache_age_seconds": cache_age,
+            "is_updating": cache_data["is_updating"]
+        }
     })
 
 if __name__ == '__main__':
@@ -353,5 +448,15 @@ if __name__ == '__main__':
     
     print(f"Admin login configured: {ADMIN_LOGIN}")
     print(f"Admin password configured: {'***' if ADMIN_PASSWORD else 'NOT SET'}")
+    print(f"Cache refresh interval: {CACHE_DURATION_SECONDS} seconds")
+    
+    # Initialiser le cache au démarrage
+    print("Initializing cache...")
+    update_cache()
+    
+    # Lancer le thread de refresh automatique
+    refresh_thread = threading.Thread(target=auto_refresh_cache, daemon=True)
+    refresh_thread.start()
+    print("Auto-refresh thread started")
     
     app.run(host='0.0.0.0', port=5000, debug=False)
